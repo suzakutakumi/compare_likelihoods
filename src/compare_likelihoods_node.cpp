@@ -56,8 +56,8 @@ private:
 
   void timer_callback()
   {
-    static int but_layer = -1;
-    for (int i = 0; i < pose_and_likelihoods.size(); i++)
+    static size_t but_layer = -1;
+    for (size_t i = 0; i < pose_and_likelihoods.size(); i++)
     {
       auto &v = pose_and_likelihoods[i];
       if (v.first.empty() or v.second.empty())
@@ -74,7 +74,7 @@ private:
     std::vector<std::pair<double, int>> evals;
 
     RCLCPP_INFO_STREAM(get_logger(), "start compare");
-    for (int i = 0; i < pose_and_likelihoods.size(); i++)
+    for (size_t i = 0; i < pose_and_likelihoods.size(); i++)
     {
       auto &likelihoods = pose_and_likelihoods[i].second;
       evals.emplace_back(likelihoods[2], i);
@@ -94,7 +94,7 @@ private:
       auto &likelihoods = pose_and_likelihoods[i].second;
 
       std::string likelihoods_str;
-      for (auto l : likelihoods)
+      for (auto &l : likelihoods)
       {
         likelihoods_str += std::to_string(l) + ",";
       }
