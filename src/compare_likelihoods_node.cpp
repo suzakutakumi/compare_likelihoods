@@ -15,6 +15,7 @@ public:
   {
     this->declare_parameter("num_of_layer", 0);
     this->declare_parameter("interval_ms", 500);
+    this->declare_parameter("select_likelihood", 0);
 
     num_of_layer = get_parameter("num_of_layer").as_int();
     auto interval_ms = get_parameter("interval_ms").as_int();
@@ -42,6 +43,7 @@ public:
       subscribers.push_back(subscription);
     }
 
+    best_pose_publisher = this->create_publisher<std_msgs::msg::Float64MultiArray>("best_pose", 10);
     timer_ = this->create_wall_timer(std::chrono::milliseconds(interval_ms), std::bind(&CompareLikelihoods::timer_callback, this));
   }
 
@@ -51,6 +53,7 @@ private:
   using likelihoods_type = std::vector<double>;
 
   std::vector<rclcpp::Subscription<subscribe_type>::SharedPtr> subscribers;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr best_pose_publisher;
   rclcpp::TimerBase::SharedPtr timer_;
 
   std::vector<std::pair<pose_type, likelihoods_type>> pose_and_likelihoods;
@@ -76,19 +79,15 @@ private:
     std::vector<std::pair<double, int>> evals;
 
     RCLCPP_INFO_STREAM(get_logger(), "start compare");
+    auto select = get_parameter("select_likelihood").as_int();
     for (size_t i = 0; i < pose_and_likelihoods.size(); i++)
     {
       auto &likelihoods = pose_and_likelihoods[i].second;
-      evals.emplace_back(likelihoods[2], i);
+      evals.emplace_back(likelihoods[select], i);
     }
 
     std::sort(evals.begin(), evals.end());
 
-    for (auto &v : evals)
-    {
-      auto &likelihoods = pose_and_likelihoods[v.second].second;
-      RCLCPP_INFO(get_logger(), "layer %2d: %2.6lf = %2.6lf * %2.6lf", v.second, v.first, likelihoods[0], likelihoods[2]);
-    }
     for (auto &v : evals)
     {
       auto i = v.second;
@@ -102,8 +101,14 @@ private:
       }
       likelihoods_str.pop_back();
 
-      RCLCPP_INFO(get_logger(), "layer %2d(%3.4f, %3.4f, %3.4f deg): %s", i, pose[0], pose[1], pose[2], likelihoods_str.c_str());
+      RCLCPP_INFO(get_logger(), "layer %2d(%7.4f, %7.4f, %8.4f deg): %s", i, pose[0], pose[1], pose[2], likelihoods_str.c_str());
     }
+
+    std_msgs::msg::Float64MultiArray::UniquePtr best_pose(new std_msgs::msg::Float64MultiArray);
+    auto best_pose_index = (evals.rbegin()->second == 0 ? evals.rbegin() + 1 : evals.rbegin())->second;
+    best_pose->data = pose_and_likelihoods[best_pose_index].first;
+    best_pose->data[2] *= M_PI / 180.0;
+    best_pose_publisher->publish(std::move(best_pose));
 
     for (auto &v : pose_and_likelihoods)
     {
