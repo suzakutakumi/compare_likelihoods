@@ -4,6 +4,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <boost/format.hpp>
 
 using std::placeholders::_1;
 
@@ -16,6 +17,8 @@ public:
     this->declare_parameter("num_of_layer", 0);
     this->declare_parameter("interval_ms", 500);
     this->declare_parameter("select_likelihood", 0);
+    this->declare_parameter("surrounding_threshold", 60);
+    this->declare_parameter("particle_convergence_threshold", 0.8);
 
     num_of_layer = get_parameter("num_of_layer").as_int();
     auto interval_ms = get_parameter("interval_ms").as_int();
@@ -44,6 +47,7 @@ public:
     }
 
     best_pose_publisher = this->create_publisher<std_msgs::msg::Float64MultiArray>("best_pose", 10);
+    best_pose_tmp_publisher = this->create_publisher<std_msgs::msg::Float64MultiArray>("best_pose_tmp", 10);
     timer_ = this->create_wall_timer(std::chrono::milliseconds(interval_ms), std::bind(&CompareLikelihoods::timer_callback, this));
   }
 
@@ -54,6 +58,7 @@ private:
 
   std::vector<rclcpp::Subscription<subscribe_type>::SharedPtr> subscribers;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr best_pose_publisher;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr best_pose_tmp_publisher;
   rclcpp::TimerBase::SharedPtr timer_;
 
   std::vector<std::pair<pose_type, likelihoods_type>> pose_and_likelihoods;
@@ -62,7 +67,7 @@ private:
   void timer_callback()
   {
     static size_t but_layer = -1;
-    for (size_t i = 0; i < pose_and_likelihoods.size(); i++)
+    for (size_t i = 1; i < pose_and_likelihoods.size(); i++)
     {
       auto &v = pose_and_likelihoods[i];
       if (v.first.empty() or v.second.empty())
@@ -76,39 +81,86 @@ private:
       }
     }
 
-    std::vector<std::pair<double, int>> evals;
+    std::vector<std::pair<double, int>> select_layers, not_select_layers;
 
-    RCLCPP_INFO_STREAM(get_logger(), "start compare");
     auto select = get_parameter("select_likelihood").as_int();
     for (size_t i = 0; i < pose_and_likelihoods.size(); i++)
     {
       auto &likelihoods = pose_and_likelihoods[i].second;
-      evals.emplace_back(likelihoods[select], i);
+      if (pose_and_likelihoods[i].first.empty() or likelihoods.empty())
+        continue;
+
+      auto surrounding_threshold = get_parameter("surrounding_threshold").as_int();
+      auto particle_convergence_threshold = get_parameter("particle_convergence_threshold").as_double();
+
+      if (likelihoods[0] >= particle_convergence_threshold and likelihoods[4] >= (double)surrounding_threshold)
+      {
+        select_layers.emplace_back(likelihoods[select], i);
+      }
+      else
+      {
+        not_select_layers.emplace_back(likelihoods[select], i);
+      }
     }
 
-    std::sort(evals.begin(), evals.end());
+    std::sort(select_layers.begin(), select_layers.end());
+    std::sort(not_select_layers.begin(), not_select_layers.end());
 
-    for (auto &v : evals)
+    std::string output = "";
+
+    for (auto &v : not_select_layers)
     {
       auto i = v.second;
       auto &pose = pose_and_likelihoods[i].first;
       auto &likelihoods = pose_and_likelihoods[i].second;
 
-      std::string likelihoods_str;
+      output += "\n";
+      output += (boost::format("layer %2d(%7.4f, %7.4f, %8.4f deg)") % i % pose[0] % pose[1] % pose[2]).str();
       for (auto &l : likelihoods)
       {
-        likelihoods_str += std::to_string(l) + ",";
+        output += (boost::format("%10.5f, ") % l).str();
       }
-      likelihoods_str.pop_back();
+    }
+    output += "\n----";
 
-      RCLCPP_INFO(get_logger(), "layer %2d(%7.4f, %7.4f, %8.4f deg): %s", i, pose[0], pose[1], pose[2], likelihoods_str.c_str());
+    for (auto &v : select_layers)
+    {
+      auto i = v.second;
+      auto &pose = pose_and_likelihoods[i].first;
+      auto &likelihoods = pose_and_likelihoods[i].second;
+
+      output += "\n";
+      output += (boost::format("layer %2d(%7.4f, %7.4f, %8.4f deg)") % i % pose[0] % pose[1] % pose[2]).str();
+      for (auto &l : likelihoods)
+      {
+        output += (boost::format("%10.5f, ") % l).str();
+      }
+    }
+    RCLCPP_INFO(get_logger(), output);
+
+    auto pose_iter = select_layers.rbegin();
+    auto best_pose_index = 0;
+    if (pose_iter != select_layers.rend() and (pose_iter->second != 0 or (++pose_iter) != select_layers.rend()))
+    {
+      best_pose_index = pose_iter->second;
+      RCLCPP_INFO(get_logger(), "publish best pose");
+      std_msgs::msg::Float64MultiArray::UniquePtr best_pose(new std_msgs::msg::Float64MultiArray);
+      best_pose->data = pose_and_likelihoods[best_pose_index].first;
+      best_pose->data[2] *= M_PI / 180.0;
+      best_pose_publisher->publish(std::move(best_pose));
     }
 
-    std_msgs::msg::Float64MultiArray::UniquePtr best_pose(new std_msgs::msg::Float64MultiArray);
-    auto best_pose_index = (evals.rbegin()->second == 0 ? evals.rbegin() + 1 : evals.rbegin())->second;
-    best_pose->data = pose_and_likelihoods[best_pose_index].first;
-    best_pose->data[2] *= M_PI / 180.0;
-    best_pose_publisher->publish(std::move(best_pose));
+    std_msgs::msg::Float64MultiArray::UniquePtr best_pose_tmp(new std_msgs::msg::Float64MultiArray);
+    if (best_pose_index != 0)
+    {
+      best_pose_tmp->data = pose_and_likelihoods[best_pose_index].first;
+    }
+    else
+    {
+      best_pose_tmp->data = std::vector<double>{NAN, NAN, NAN};
+    }
+    best_pose_tmp->data.push_back(best_pose_index);
+    best_pose_tmp_publisher->publish(std::move(best_pose_tmp));
 
     for (auto &v : pose_and_likelihoods)
     {
