@@ -42,6 +42,7 @@ public:
             this->pose_and_likelihoods[i].second.assign(msg->data.begin() + 3, msg->data.end());
 
             this->pose_and_likelihoods[i].first[2] *= 180 / M_PI;
+            this->timer_->execute_callback();
           });
       subscribers.push_back(subscription);
     }
